@@ -1,24 +1,70 @@
-from dagster import Definitions, RunRequest, load_assets_from_modules, schedule, ScheduleEvaluationContext, SkipReason, define_asset_job
+from dagster import (
+    AssetExecutionContext,
+    AssetKey,
+    Definitions,
+    RunFailureSensorContext,
+    RunRequest,
+    asset,
+    define_asset_job,
+    run_failure_sensor,
+)
 
-from . import assets
 
-all_assets = load_assets_from_modules([assets])
+@asset
+def my_upstream_asset() -> int:
+   return 1
+   
+@asset
+def my_downstream_asset(context: AssetExecutionContext, my_upstream_asset: int) -> None:
+  # if tags are passed through, pass this asset
+  if context.run_tags.get("ecs/cpu") == "256":
+    return
+  raise Exception("failed!")
 
-# fake complete marker of external s3 files
-IS_S3_COMPLETE = True
 
-all_asset_job = define_asset_job("all_asset_job")
+my_asset_job = define_asset_job(
+    "my_asset_job",
+    selection=[my_upstream_asset, my_downstream_asset],
+)
 
-@schedule(job=all_asset_job, cron_schedule="*/10 6-8 * * *", execution_timezone="US/Pacific")
-def my_schedule(context: ScheduleEvaluationContext):
-  # check if s3 files are complete
-  if not IS_S3_COMPLETE:
-    return SkipReason("S3 files not complete")
   
-  return RunRequest(run_key="some_run_key")
-  
+# @run_failure_sensor(monitored_jobs=[my_asset_job], request_job=my_asset_job)
+# def multi_asset_sensor(context: RunFailureSensorContext):
+#     # get all events for the failed run
+#     all_records_for_failed_run = context.instance.get_records_for_run(
+#         run_id=context.dagster_run.run_id,
+#     ).records
+
+#     # find all the failed assets
+#     all_failed_assets = []
+#     for record in all_records_for_failed_run:
+#         dagster_event = record.event_log_entry.dagster_event
+#         if dagster_event and dagster_event.is_step_failure and dagster_event.step_key:
+#             print(dagster_event.step_key)
+#             all_failed_assets.append(AssetKey(dagster_event.step_key))
+    
+#     # this would launch a new run with the updated tags and only run the selected assets
+#     return RunRequest(
+#        run_key=context.dagster_run.run_id, # this is the cursor so we don't get triggered by the same run again
+#        tags={
+#           "ecs/cpu": "256",
+#           "ecs/memory": "512",
+#           # thew two tags link the new run to the failed run so we get the re-execution lineage
+#           "dagster/root_run_id": context.dagster_run.root_run_id or context.dagster_run.run_id, 
+#           "dagster/parent_run_id": context.dagster_run.run_id,
+#         }, # tags to bump the task resources
+#         asset_selection=all_failed_assets
+#     )
+
+
+@run_failure_sensor
+def multi_asset_sensor(context: RunFailureSensorContext):
+   print("hello!!!!!!!!!!!")
+
+
 
 defs = Definitions(
-    assets=all_assets,
-    schedules=[my_schedule],
+    assets=[my_upstream_asset, my_downstream_asset],
+    jobs=[my_asset_job],
+    sensors=[multi_asset_sensor],
 )
